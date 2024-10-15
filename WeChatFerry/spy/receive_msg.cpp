@@ -1,36 +1,57 @@
 ﻿#pragma execution_character_set("utf-8")
 
+#include "MinHook.h"
 #include "framework.h"
 #include <condition_variable>
 #include <mutex>
 #include <queue>
 
-#include "load_calls.h"
 #include "log.h"
 #include "receive_msg.h"
 #include "user_info.h"
 #include "util.h"
 
 // Defined in rpc_server.cpp
-extern bool gIsListening, gIsListeningPyq;
+extern bool gIsLogging, gIsListening, gIsListeningPyq;
 extern mutex gMutex;
 extern condition_variable gCV;
 extern queue<WxMsg_t> gMsgQueue;
 
 // Defined in spy.cpp
-extern WxCalls_t g_WxCalls;
-extern DWORD g_WeChatWinDllAddr;
+extern QWORD g_WeChatWinDllAddr;
 
-static DWORD reg_buffer          = 0;
-static DWORD recvMsgHookAddr     = 0;
-static DWORD recvMsgCallAddr     = 0;
-static DWORD recvMsgJumpBackAddr = 0;
-static CHAR recvMsgBackupCode[5] = { 0 };
+#define OS_RECV_MSG_ID      0x30
+#define OS_RECV_MSG_TYPE    0x38
+#define OS_RECV_MSG_SELF    0x3C
+#define OS_RECV_MSG_TS      0x44
+#define OS_RECV_MSG_ROOMID  0x48
+#define OS_RECV_MSG_CONTENT 0x88
+#define OS_RECV_MSG_WXID    0x240
+#define OS_RECV_MSG_SIGN    0x260
+#define OS_RECV_MSG_THUMB   0x280
+#define OS_RECV_MSG_EXTRA   0x2A0
+#define OS_RECV_MSG_XML     0x308
+#define OS_RECV_MSG_CALL    0x2205510
+#define OS_PYQ_MSG_START    0x30
+#define OS_PYQ_MSG_END      0x38
+#define OS_PYQ_MSG_TS       0x38
+#define OS_PYQ_MSG_XML      0x9B8
+#define OS_PYQ_MSG_SENDER   0x18
+#define OS_PYQ_MSG_CONTENT  0x48
+#define OS_PYQ_MSG_CALL     0x2EFAA10
+#define OS_WXLOG            0x26DA2D0
 
-static DWORD recvPyqHookAddr     = 0;
-static DWORD recvPyqCallAddr     = 0;
-static DWORD recvPyqJumpBackAddr = 0;
-static CHAR recvPyqBackupCode[5] = { 0 };
+typedef QWORD (*RecvMsg_t)(QWORD, QWORD);
+typedef QWORD (*WxLog_t)(QWORD, QWORD, QWORD, QWORD, QWORD, QWORD, QWORD, QWORD, QWORD, QWORD, QWORD, QWORD);
+typedef QWORD (*RecvPyq_t)(QWORD, QWORD, QWORD);
+
+static RecvMsg_t funcRecvMsg = nullptr;
+static RecvMsg_t realRecvMsg = nullptr;
+static WxLog_t funcWxLog     = nullptr;
+static WxLog_t realWxLog     = nullptr;
+static RecvPyq_t funcRecvPyq = nullptr;
+static RecvPyq_t realRecvPyq = nullptr;
+static bool isMH_Initialized = false;
 
 MsgTypes_t GetMsgTypes()
 {
@@ -73,46 +94,26 @@ MsgTypes_t GetMsgTypes()
     return m;
 }
 
-void HookAddress(DWORD hookAddr, LPVOID funcAddr, CHAR recvMsgBackupCode[5])
+static QWORD DispatchMsg(QWORD arg1, QWORD arg2)
 {
-    // 组装跳转数据
-    BYTE jmpCode[5] = { 0 };
-    jmpCode[0]      = 0xE9;
-
-    // 计算偏移
-    *(DWORD *)&jmpCode[1] = (DWORD)funcAddr - hookAddr - 5;
-
-    // 备份原来的代码
-    ReadProcessMemory(GetCurrentProcess(), (LPVOID)hookAddr, recvMsgBackupCode, 5, 0);
-    // 写入新的代码
-    WriteProcessMemory(GetCurrentProcess(), (LPVOID)hookAddr, jmpCode, 5, 0);
-}
-
-void UnHookAddress(DWORD hookAddr, CHAR restoreCode[5])
-{
-    WriteProcessMemory(GetCurrentProcess(), (LPVOID)hookAddr, restoreCode, 5, 0);
-}
-
-void DispatchMsg(DWORD reg)
-{
-    WxMsg_t wxMsg;
+    WxMsg_t wxMsg = { 0 };
     try {
-        wxMsg.id      = GET_QWORD(reg + g_WxCalls.recvMsg.msgId);
-        wxMsg.type    = GET_DWORD(reg + g_WxCalls.recvMsg.type);
-        wxMsg.is_self = GET_DWORD(reg + g_WxCalls.recvMsg.isSelf);
-        wxMsg.ts      = GET_DWORD(reg + g_WxCalls.recvMsg.ts);
-        wxMsg.content = GetStringByWstrAddr(reg + g_WxCalls.recvMsg.content);
-        wxMsg.sign    = GetStringByStrAddr(reg + g_WxCalls.recvMsg.sign);
-        wxMsg.xml     = GetStringByStrAddr(reg + g_WxCalls.recvMsg.msgXml);
+        wxMsg.id      = GET_QWORD(arg2 + OS_RECV_MSG_ID);
+        wxMsg.type    = GET_DWORD(arg2 + OS_RECV_MSG_TYPE);
+        wxMsg.is_self = GET_DWORD(arg2 + OS_RECV_MSG_SELF);
+        wxMsg.ts      = GET_DWORD(arg2 + OS_RECV_MSG_TS);
+        wxMsg.content = GetStringByWstrAddr(arg2 + OS_RECV_MSG_CONTENT);
+        wxMsg.sign    = GetStringByWstrAddr(arg2 + OS_RECV_MSG_SIGN);
+        wxMsg.xml     = GetStringByWstrAddr(arg2 + OS_RECV_MSG_XML);
 
-        string roomid = GetStringByWstrAddr(reg + g_WxCalls.recvMsg.roomId);
+        string roomid = GetStringByWstrAddr(arg2 + OS_RECV_MSG_ROOMID);
+        wxMsg.roomid  = roomid;
         if (roomid.find("@chatroom") != string::npos) { // 群 ID 的格式为 xxxxxxxxxxx@chatroom
             wxMsg.is_group = true;
-            wxMsg.roomid   = roomid;
             if (wxMsg.is_self) {
                 wxMsg.sender = GetSelfWxid();
             } else {
-                wxMsg.sender = GetStringByStrAddr(reg + g_WxCalls.recvMsg.wxid);
+                wxMsg.sender = GetStringByWstrAddr(arg2 + OS_RECV_MSG_WXID);
             }
         } else {
             wxMsg.is_group = false;
@@ -123,13 +124,13 @@ void DispatchMsg(DWORD reg)
             }
         }
 
-        wxMsg.thumb = GetStringByStrAddr(reg + g_WxCalls.recvMsg.thumb);
+        wxMsg.thumb = GetStringByWstrAddr(arg2 + OS_RECV_MSG_THUMB);
         if (!wxMsg.thumb.empty()) {
             wxMsg.thumb = GetHomePath() + wxMsg.thumb;
             replace(wxMsg.thumb.begin(), wxMsg.thumb.end(), '\\', '/');
         }
 
-        wxMsg.extra = GetStringByStrAddr(reg + g_WxCalls.recvMsg.extra);
+        wxMsg.extra = GetStringByWstrAddr(arg2 + OS_RECV_MSG_EXTRA);
         if (!wxMsg.extra.empty()) {
             wxMsg.extra = GetHomePath() + wxMsg.extra;
             replace(wxMsg.extra.begin(), wxMsg.extra.end(), '\\', '/');
@@ -146,53 +147,26 @@ void DispatchMsg(DWORD reg)
     }
 
     gCV.notify_all(); // 通知各方消息就绪
+    return realRecvMsg(arg1, arg2);
 }
 
-__declspec(naked) void RecieveMsgFunc()
+static QWORD PrintWxLog(QWORD a1, QWORD a2, QWORD a3, QWORD a4, QWORD a5, QWORD a6, QWORD a7, QWORD a8, QWORD a9,
+                        QWORD a10, QWORD a11, QWORD a12)
 {
-    __asm {
-        pushad
-        pushfd
-        push ecx
-        call DispatchMsg
-        add esp, 0x4
-        popfd
-        popad
-        call recvMsgCallAddr // 这个为被覆盖的call
-        jmp recvMsgJumpBackAddr // 跳回被HOOK指令的下一条指令
-    }
-}
-
-void ListenMessage()
-{
-    // DbgMsg("ListenMessage");
-    // OutputDebugString(L"ListenMessage\n");
-    // MessageBox(NULL, L"ListenMessage", L"ListenMessage", 0);
-    if (gIsListening || (g_WeChatWinDllAddr == 0)) {
-        return;
+    QWORD p = realWxLog(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12);
+    if (p == 0 || p == 1) {
+        return p;
     }
 
-    recvMsgHookAddr     = g_WeChatWinDllAddr + g_WxCalls.recvMsg.hook;
-    recvMsgCallAddr     = g_WeChatWinDllAddr + g_WxCalls.recvMsg.call;
-    recvMsgJumpBackAddr = recvMsgHookAddr + 5;
+    LOG_INFO("【WX】\n{}", GB2312ToUtf8((char *)p));
 
-    HookAddress(recvMsgHookAddr, RecieveMsgFunc, recvMsgBackupCode);
-    gIsListening = true;
+    return p;
 }
 
-void UnListenMessage()
+static void DispatchPyq(QWORD arg1, QWORD arg2, QWORD arg3)
 {
-    if (!gIsListening) {
-        return;
-    }
-    UnHookAddress(recvMsgHookAddr, recvMsgBackupCode);
-    gIsListening = false;
-}
-
-void DispatchPyq(DWORD reg)
-{
-    DWORD startAddr = *(DWORD *)(reg + g_WxCalls.pyq.start);
-    DWORD endAddr   = *(DWORD *)(reg + g_WxCalls.pyq.end);
+    QWORD startAddr = *(QWORD *)(arg2 + OS_PYQ_MSG_START);
+    QWORD endAddr   = *(QWORD *)(arg2 + OS_PYQ_MSG_END);
 
     if (startAddr == 0) {
         return;
@@ -205,10 +179,10 @@ void DispatchPyq(DWORD reg)
         wxMsg.is_self  = false;
         wxMsg.is_group = false;
         wxMsg.id       = GET_QWORD(startAddr);
-        wxMsg.ts       = GET_DWORD(startAddr + g_WxCalls.pyq.ts);
-        wxMsg.xml      = GetStringByWstrAddr(startAddr + g_WxCalls.pyq.xml);
-        wxMsg.sender   = GetStringByWstrAddr(startAddr + g_WxCalls.pyq.wxid);
-        wxMsg.content  = GetStringByWstrAddr(startAddr + g_WxCalls.pyq.content);
+        wxMsg.ts       = GET_DWORD(startAddr + OS_PYQ_MSG_TS);
+        wxMsg.xml      = GetStringByWstrAddr(startAddr + OS_PYQ_MSG_XML);
+        wxMsg.sender   = GetStringByWstrAddr(startAddr + OS_PYQ_MSG_SENDER);
+        wxMsg.content  = GetStringByWstrAddr(startAddr + OS_PYQ_MSG_CONTENT);
 
         {
             unique_lock<mutex> lock(gMutex);
@@ -217,45 +191,188 @@ void DispatchPyq(DWORD reg)
 
         gCV.notify_all(); // 通知各方消息就绪
 
-        startAddr += g_WxCalls.pyq.step;
+        startAddr += 0x1618;
     }
 }
 
-__declspec(naked) void RecievePyqFunc()
+static MH_STATUS InitializeHook()
 {
-    __asm {
-        pushad
-        pushfd
-        push [esp + 0x24]
-        call DispatchPyq
-        add esp, 0x4
-        popfd
-        popad
-        call recvPyqCallAddr // 这个为被覆盖的call
-        jmp recvPyqJumpBackAddr // 跳回被HOOK指令的下一条指令
+    if (isMH_Initialized) {
+        return MH_OK;
+    }
+    MH_STATUS status = MH_Initialize();
+    if (status == MH_OK) {
+        isMH_Initialized = true;
+    }
+    return status;
+}
+
+static MH_STATUS UninitializeHook()
+{
+    if (!isMH_Initialized) {
+        return MH_OK;
+    }
+    if (gIsLogging || gIsListening || gIsListeningPyq) {
+        return MH_OK;
+    }
+    MH_STATUS status = MH_Uninitialize();
+    if (status == MH_OK) {
+        isMH_Initialized = false;
+    }
+    return status;
+}
+
+void EnableLog()
+{
+    MH_STATUS status = MH_UNKNOWN;
+    if (gIsLogging) {
+        LOG_WARN("gIsLogging");
+        return;
+    }
+    WxLog_t funcWxLog = (WxLog_t)(g_WeChatWinDllAddr + OS_WXLOG);
+
+    status = InitializeHook();
+    if (status != MH_OK) {
+        LOG_ERROR("MH_Initialize failed: {}", to_string(status));
+        return;
+    }
+
+    status = MH_CreateHook(funcWxLog, &PrintWxLog, reinterpret_cast<LPVOID *>(&realWxLog));
+    if (status != MH_OK) {
+        LOG_ERROR("MH_CreateHook failed: {}", to_string(status));
+        return;
+    }
+
+    status = MH_EnableHook(funcWxLog);
+    if (status != MH_OK) {
+        LOG_ERROR("MH_EnableHook failed: {}", to_string(status));
+        return;
+    }
+    gIsLogging = true;
+}
+
+void DisableLog()
+{
+    MH_STATUS status = MH_UNKNOWN;
+    if (!gIsLogging) {
+        return;
+    }
+
+    status = MH_DisableHook(funcWxLog);
+    if (status != MH_OK) {
+        LOG_ERROR("MH_DisableHook failed: {}", to_string(status));
+        return;
+    }
+
+    gIsLogging = false;
+
+    status = UninitializeHook();
+    if (status != MH_OK) {
+        LOG_ERROR("MH_Uninitialize failed: {}", to_string(status));
+        return;
+    }
+}
+
+void ListenMessage()
+{
+    MH_STATUS status = MH_UNKNOWN;
+    if (gIsListening) {
+        LOG_WARN("gIsListening");
+        return;
+    }
+    funcRecvMsg = (RecvMsg_t)(g_WeChatWinDllAddr + OS_RECV_MSG_CALL);
+
+    status = InitializeHook();
+    if (status != MH_OK) {
+        LOG_ERROR("MH_Initialize failed: {}", to_string(status));
+        return;
+    }
+
+    status = MH_CreateHook(funcRecvMsg, &DispatchMsg, reinterpret_cast<LPVOID *>(&realRecvMsg));
+    if (status != MH_OK) {
+        LOG_ERROR("MH_CreateHook failed: {}", to_string(status));
+        return;
+    }
+
+    status = MH_EnableHook(funcRecvMsg);
+    if (status != MH_OK) {
+        LOG_ERROR("MH_EnableHook failed: {}", to_string(status));
+        return;
+    }
+
+    gIsListening = true;
+}
+
+void UnListenMessage()
+{
+    MH_STATUS status = MH_UNKNOWN;
+    if (!gIsListening) {
+        return;
+    }
+
+    status = MH_DisableHook(funcRecvMsg);
+    if (status != MH_OK) {
+        LOG_ERROR("MH_DisableHook failed: {}", to_string(status));
+        return;
+    }
+
+    gIsListening = false;
+
+    status = UninitializeHook();
+    if (status != MH_OK) {
+        LOG_ERROR("MH_Uninitialize failed: {}", to_string(status));
+        return;
     }
 }
 
 void ListenPyq()
 {
-    if (gIsListeningPyq || (g_WeChatWinDllAddr == 0)) {
+    MH_STATUS status = MH_UNKNOWN;
+    if (gIsListeningPyq) {
+        LOG_WARN("gIsListeningPyq");
+        return;
+    }
+    funcRecvPyq = (RecvPyq_t)(g_WeChatWinDllAddr + OS_PYQ_MSG_CALL);
+
+    status = InitializeHook();
+    if (status != MH_OK) {
+        LOG_ERROR("MH_Initialize failed: {}", to_string(status));
         return;
     }
 
-    recvPyqHookAddr     = g_WeChatWinDllAddr + g_WxCalls.pyq.hook;
-    recvPyqCallAddr     = g_WeChatWinDllAddr + g_WxCalls.pyq.call;
-    recvPyqJumpBackAddr = recvPyqHookAddr + 5;
+    status = MH_CreateHook(funcRecvPyq, &DispatchPyq, reinterpret_cast<LPVOID *>(&realRecvPyq));
+    if (status != MH_OK) {
+        LOG_ERROR("MH_CreateHook failed: {}", to_string(status));
+        return;
+    }
 
-    HookAddress(recvPyqHookAddr, RecievePyqFunc, recvPyqBackupCode);
+    status = MH_EnableHook(funcRecvPyq);
+    if (status != MH_OK) {
+        LOG_ERROR("MH_EnableHook failed: {}", to_string(status));
+        return;
+    }
+
     gIsListeningPyq = true;
 }
 
 void UnListenPyq()
 {
+    MH_STATUS status = MH_UNKNOWN;
     if (!gIsListeningPyq) {
         return;
     }
 
-    UnHookAddress(recvPyqHookAddr, recvPyqBackupCode);
+    status = MH_DisableHook(funcRecvPyq);
+    if (status != MH_OK) {
+        LOG_ERROR("MH_DisableHook failed: {}", to_string(status));
+        return;
+    }
+
     gIsListeningPyq = false;
+
+    status = UninitializeHook();
+    if (status != MH_OK) {
+        LOG_ERROR("MH_Uninitialize failed: {}", to_string(status));
+        return;
+    }
 }

@@ -24,16 +24,10 @@
     <ClInclude Include="rpc_server.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="log.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
     <ClInclude Include="exec_sql.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="contact_mgmt.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="load_calls.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="receive_msg.h">
@@ -46,9 +40,6 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="spy_types.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="util.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="..\rpc\nanopb\pb.h">
@@ -84,13 +75,16 @@
     <ClInclude Include="funcs.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="receive_transfer.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
     <ClInclude Include="sqlite3.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="..\smc\codec.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\com\log.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\com\util.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>
@@ -101,16 +95,10 @@
     <ClCompile Include="rpc_server.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="log.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
     <ClCompile Include="exec_sql.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="contact_mgmt.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="load_calls.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="receive_msg.cpp">
@@ -120,9 +108,6 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="spy.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="util.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="..\rpc\nanopb\pb_common.c">
@@ -149,7 +134,10 @@
     <ClCompile Include="funcs.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="receive_transfer.cpp">
+    <ClCompile Include="..\com\log.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="..\com\util.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
